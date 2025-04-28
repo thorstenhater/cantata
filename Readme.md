@@ -14,6 +14,13 @@ or here
 
 https://github.com/AllenInstitute/bmtk
 
+:warning: Cantata requires that synapse positions are included in the SONATA
+files, since the native storage format relies on unportable Neuron internals.
+The relevant HDF5 dataset names are ``afferent_section_xcoords``,
+``afferent_section_ycoords``, and ``afferent_section_zcoords``, with the obivous
+meaning.
+
+
 ## Setup (stable)
 
 ``` sh

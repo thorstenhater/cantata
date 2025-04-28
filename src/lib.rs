@@ -3,7 +3,7 @@ pub use std::collections::BTreeSet as Set;
 
 pub mod err;
 pub mod fit;
-pub mod gen;
+pub mod r#gen;
 pub mod nml;
 pub mod raw;
 pub mod sim;

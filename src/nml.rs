@@ -45,11 +45,7 @@ pub fn mk_acc(data: &Path) -> Result<String> {
     let (_, cell) = cells.first_key_value().unwrap();
     let mut decor = cell.decor.clone();
     for it in decor.iter_mut() {
-        if let nml2::acc::Decor::Paint(
-            _,
-            nml2::acc::Paintable::Mech(ref mut mech, ref mut params),
-        ) = it
-        {
+        if let nml2::acc::Decor::Paint(_, nml2::acc::Paintable::Mech(mech, params)) = it {
             for (m, p, q) in PARAMS.iter() {
                 if m != mech {
                     continue;

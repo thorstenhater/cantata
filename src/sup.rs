@@ -1,4 +1,4 @@
-use crate::{err::Result, Map};
+use crate::{Map, err::Result};
 use anyhow::bail;
 use std::path::Path;
 use std::str::FromStr;

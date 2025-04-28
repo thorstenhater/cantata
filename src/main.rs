@@ -1,12 +1,12 @@
 use cantata::{
     err::{Context, Result},
     fit::Fit,
-    gen::Bundle,
+    r#gen::Bundle,
     nml, raw,
     sim::Simulation,
     sup::find_component,
 };
-use clap::{self, Parser, Subcommand, ValueEnum};
+use clap::{self, Parser, Subcommand};
 use std::str::FromStr;
 
 #[derive(Parser)]
@@ -17,21 +17,11 @@ struct Cli {
     cmd: Cmd,
 }
 
-#[allow(clippy::upper_case_acronyms)]
-#[derive(Hash, PartialEq, PartialOrd, Eq, Ord, Clone, Copy, ValueEnum)]
-enum Format {
-    CBOR,
-    JSON,
-    Pickle,
-}
-
 #[derive(Subcommand)]
 enum Cmd {
     Build {
         from: String,
         to: String,
-        #[arg(short, long)]
-        formats: Vec<Format>,
     },
     Run {
         from: String,
@@ -40,7 +30,7 @@ enum Cmd {
     },
 }
 
-fn build(from: &str, to: &str, formats: &[Format]) -> Result<()> {
+fn build(from: &str, to: &str) -> Result<()> {
     let raw =
         raw::Simulation::from_file(from).with_context(|| format!("Parsing simulation {from}"))?;
     let sim = Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
@@ -97,26 +87,13 @@ fn build(from: &str, to: &str, formats: &[Format]) -> Result<()> {
     to.pop();
 
     to.push("dat");
-    std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-    if formats.contains(&Format::JSON) {
-        to.push("sim.json");
-        let writer = std::fs::File::create(&to)?;
-        serde_json::to_writer_pretty(writer, &out)?;
-        to.pop();
-    }
-    if formats.is_empty() || formats.contains(&Format::CBOR) {
+    {
+        std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
         to.push("sim.cbor");
         let writer = std::fs::File::create(&to)?;
         ciborium::into_writer(&out, writer)?;
         to.pop();
     }
-    if formats.contains(&Format::Pickle) {
-        to.push("sim.pcl");
-        let mut writer = std::fs::File::create(&to)?;
-        serde_pickle::to_writer(&mut writer, &out, Default::default())?;
-        to.pop();
-    }
-
     to.pop();
 
     to.push("out");
@@ -132,18 +109,9 @@ fn build(from: &str, to: &str, formats: &[Format]) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let mut cli = Cli::parse();
+    let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build {
-            from,
-            to,
-            ref mut formats,
-        } => {
-            if formats.is_empty() {
-                formats.push(Format::CBOR);
-            }
-            build(&from, &to, formats)
-        }
+        Cmd::Build { from, to } => build(&from, &to),
         Cmd::Run { from, to } => {
             let to = if let Some(to) = to {
                 to.to_string()
@@ -152,7 +120,7 @@ fn main() -> Result<()> {
                 to.set_extension("sim");
                 to.file_name().and_then(|s| s.to_str()).unwrap().to_string()
             };
-            build(&from, &to, &[Format::CBOR])?;
+            build(&from, &to)?;
             let _ = std::process::Command::new("python3")
                 .current_dir(to)
                 .arg("main.py")

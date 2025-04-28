@@ -1,8 +1,8 @@
 [package]
 name = "cantata"
-version = "0.2.2"
-edition = "2021"
-rust-version = "1.80.0"
+version = "0.11.0-dev"
+edition = "2024"
+rust-version = "1.85.0"
 authors = ["T. Hater"]
 readme = "Readme.md"
 license = "BSD-3-Clause"
@@ -15,12 +15,11 @@ categories = ["command-line-utilities"]
 serde        = { version = "1.0", features = ["derive"] }
 serde_json   = { version = "1.0" }
 clap         = { version = "4.0", features = ["derive"] }
-thiserror    = { version = "1.0" }
-anyhow       = { version = "1.0.86" }
+thiserror    = { version = "2.0" }
+anyhow       = { version = "1.0" }
 csv          = { version = "1.0" }
-hdf5-metno   = { version = "0.9.2" }
+hdf5-metno   = { version = "0.10" }
 ciborium     = { version = "0.2" }
-serde-pickle = { version = "1.1" }
 nml2         = { version = "0.3.1"}
 
 [[bin]]

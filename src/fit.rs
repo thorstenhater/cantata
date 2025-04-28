@@ -1,10 +1,10 @@
 use anyhow::bail;
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 
 use crate::{
-    err::{Context, Result},
     Map,
+    err::{Context, Result},
 };
 
 use std::{fs::File, path::PathBuf};
@@ -263,8 +263,11 @@ impl Fit {
                     x => bail!("Unexpected key {x}"),
                 }
             } else {
-                bail!("Section: parameter must end in mechanism name, or be empty *and* the name key must be one of cm, ra. Found mech={} and name={}",
-                      mech, section.name);
+                bail!(
+                    "Section: parameter must end in mechanism name, or be empty *and* the name key must be one of cm, ra. Found mech={} and name={}",
+                    mech,
+                    section.name
+                );
             }
         }
 

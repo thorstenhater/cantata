@@ -50,8 +50,8 @@ have_gpu = args.use_gpu
 have_plots = args.plot
 
 # version meta data
-cur_version = [0, 10, 0]
-nxt_version = [0, 11, 0]
+cur_version = [0, 11, 0]
+nxt_version = [0, 12, 0]
 cur_version_str = f"{cur_version[0]}.{cur_version[1]}.{cur_version[2]}"
 nxt_version_str = "nxt_version[0]}.{nxt_version[1]}.{nxt_version[2]}"
 
@@ -103,15 +103,18 @@ def load_morphology(path):
     sfx = path.suffix
     if sfx == ".swc":
         try:
-            return A.load_swc_arbor(path).morphology
-        except:
+            res = A.load_swc_neuron(path)
+            return res.morphology
+        except Exception as _:
             pass
         try:
-            return A.load_swc_neuron(path).morphology
-        except:
+            res = A.load_swc_arbor(path)
+            return res.morphology
+        except Exception as _:
             raise RuntimeError(
                 f"Could load {path} neither as NEURON nor Arbor flavour."
             )
+
     elif sfx == ".asc":
         return A.load_asc(path).morphology
     elif sfx == ".nml":
@@ -426,8 +429,6 @@ class recipe(A.recipe):
 
     def load_cable_data(self, gid):
         mid, cid = self.gid_to_bio[gid]
-        if gid == 118:
-            print(self.cid_to_acc[cid])
         if gid not in self.cable_data:
             timing.tic("build/simulation/io")
             mrf = load_morphology(here / "mrf" / self.mid_to_mrf[mid])
@@ -435,7 +436,7 @@ class recipe(A.recipe):
             self.cable_data[gid] = (mrf, dec)
             timing.toc("build/simulation/io")
         mrf, dec = self.cable_data[gid]
-        return mrf, A.decor(dec)  # NOTE copy that decor!!
+        return mrf, A.decor(dec) # NOTE copy that decor!!
 
 
 timing.tic("build/recipe")
@@ -443,11 +444,12 @@ rec = recipe()
 timing.toc("build/recipe")
 
 timing.tic("build/simulation")
+
 comm = None
 if have_mpi:
     from mpi4py import MPI
-
     comm = MPI.COMM_WORLD
+
 gpu = None
 if have_gpu:
     gpu = 0

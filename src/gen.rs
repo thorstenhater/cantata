@@ -1,13 +1,13 @@
 use crate::{
+    Map,
     err::Result,
     fit::Attribute,
     sim::{CVPolicy, GlobalProperties, IClamp, ModelType, Node, Probe, Simulation},
-    Map,
 };
 use anyhow::{anyhow, bail};
 use serde::Serialize;
 
-/// Resources to store in the output.
+// Resources to store in the output.
 
 /// (src_gid, src_tag, tgt_tag, weight, delay)
 type ConnectionData = (usize, usize, usize, f64, f64);
@@ -145,7 +145,14 @@ impl Bundle {
                         ));
                         let mech = edge.mech.as_ref().ok_or(anyhow!("Edge has no mechanism"))?;
                         let mech = fudge_synapse_dynamics(mech);
-                        syn.push((edge.target.0, edge.target.1, edge.target.2, mech, edge.dynamics.clone(), ix));
+                        syn.push((
+                            edge.target.0,
+                            edge.target.1,
+                            edge.target.2,
+                            mech,
+                            edge.dynamics.clone(),
+                            ix,
+                        ));
                     }
                     incoming_connections.insert(gid, inc);
                     synapses.insert(gid, syn);
@@ -258,11 +265,11 @@ impl Bundle {
                             ]);
                             for (k, v) in node.dynamics.iter() {
                                 match k.as_ref() {
-                                    "tau" =>
-                                        params.insert("tau".to_string(), *v),
-                                    "refrac" =>
-                                        params.insert("t_ref".to_string(), *v),
-                                    _ => bail!("Unknown parameter <{k}> for template IntFire1 at gid {gid}")
+                                    "tau" => params.insert("tau".to_string(), *v),
+                                    "refrac" => params.insert("t_ref".to_string(), *v),
+                                    _ => bail!(
+                                        "Unknown parameter <{k}> for template IntFire1 at gid {gid}"
+                                    ),
                                 };
                             }
                             gid_to_lif.insert(gid, params);

@@ -5,17 +5,16 @@ use std::{
 };
 
 use crate::{
-    err::{anyhow, Context, Result},
-    sup::{resolve_manifest, Components, Manifest},
     Map,
+    err::{Context, Result, anyhow},
+    sup::{Components, Manifest, resolve_manifest},
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Raw SONATA types
-///
-/// Used to ingest simulation.json files.
+// Raw SONATA types
+// Used to ingest simulation.json files.
 
 /// default=true
 fn yes() -> bool {

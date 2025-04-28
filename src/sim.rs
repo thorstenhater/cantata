@@ -1,9 +1,9 @@
 use crate::{
+    Map,
     err::{Context, Result},
     fit::Attribute,
     raw,
-    sup::{find_component, Components},
-    Map,
+    sup::{Components, find_component},
 };
 use anyhow::{anyhow, bail};
 use hdf5_metno as hdf5;
@@ -668,7 +668,9 @@ fn read_virtual_spikes(
                     let nodes = get_dataset::<u32>(&spikes, "node_ids")?;
                     let times = get_dataset::<f64>(&spikes, "timestamps")?;
                     if times.len() != nodes.len() {
-                        bail!("Virtual spike data for {node_set_name} has different lengths on timestamps and node_ids");
+                        bail!(
+                            "Virtual spike data for {node_set_name} has different lengths on timestamps and node_ids"
+                        );
                     }
                     for (id, ts) in nodes.iter().zip(times.iter()) {
                         data.entry(*id as u64).or_default().push(*ts);
@@ -921,11 +923,15 @@ impl Simulation {
                                     }
                                     pred &= found;
                                 }
-                                _ => bail!("Cannot match on a {vs:?} in BasicNodeSet, must be list or value.")
+                                _ => bail!(
+                                    "Cannot match on a {vs:?} in BasicNodeSet, must be list or value."
+                                ),
                             };
                         } else {
                             // TODO What happens if we do not match the parameter name here?
-                            eprintln!("Note: paramter {k} was not found in node {gid}. Currently we reject such nodes. If you consider this a bug, please report it as such.")
+                            eprintln!(
+                                "Note: paramter {k} was not found in node {gid}. Currently we reject such nodes. If you consider this a bug, please report it as such."
+                            )
                         }
                     }
                     if pred {
@@ -1050,58 +1056,64 @@ impl Simulation {
                         None
                     };
 
-                    let tgt_pos_x = if let Some(ds) = edge_group.custom.get("afferent_section_xcoords") {
+                    let tgt_pos_x = if let Some(ds) =
+                        edge_group.custom.get("afferent_section_xcoords")
+                    {
                         ds[group_index]
                     } else if let Some(s) = ty.attributes.get("afferent_section_xcoords") {
                         if let Attribute::Float(s) = s {
                             *s
                         } else {
                             bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
+                                "Edge type {type_id} in population {} has non-numeric segment position",
+                                edge_population.name
+                            );
                         }
                     } else {
                         bail!(
-                                "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `x` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                                edge_population.name
-                                );
+                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `x` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
+                            edge_population.name
+                        );
                     };
 
-                    let tgt_pos_y = if let Some(ds) = edge_group.custom.get("afferent_section_ycoords") {
+                    let tgt_pos_y = if let Some(ds) =
+                        edge_group.custom.get("afferent_section_ycoords")
+                    {
                         ds[group_index]
                     } else if let Some(s) = ty.attributes.get("afferent_section_ycoords") {
                         if let Attribute::Float(s) = s {
                             *s
                         } else {
                             bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
+                                "Edge type {type_id} in population {} has non-numeric segment position",
+                                edge_population.name
+                            );
                         }
                     } else {
                         bail!(
-                                "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `y` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                                edge_population.name
-                                );
+                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `y` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
+                            edge_population.name
+                        );
                     };
 
-                    let tgt_pos_z = if let Some(ds) = edge_group.custom.get("afferent_section_zcoords") {
+                    let tgt_pos_z = if let Some(ds) =
+                        edge_group.custom.get("afferent_section_zcoords")
+                    {
                         ds[group_index]
                     } else if let Some(s) = ty.attributes.get("afferent_section_zcoords") {
                         if let Attribute::Float(s) = s {
                             *s
                         } else {
                             bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
+                                "Edge type {type_id} in population {} has non-numeric segment position",
+                                edge_population.name
+                            );
                         }
                     } else {
                         bail!(
-                                "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `z` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                                edge_population.name
-                                );
+                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `z` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
+                            edge_population.name
+                        );
                     };
 
                     let src_pos = if let Some(ds) = edge_group.custom.get("efferent_swc_pos") {
@@ -1111,19 +1123,25 @@ impl Simulation {
                             *s
                         } else {
                             bail!(
-                                    "Edge type {type_id} in population {} has non-numeric segment position",
-                                    edge_population.name
-                                );
+                                "Edge type {type_id} in population {} has non-numeric segment position",
+                                edge_population.name
+                            );
                         }
                     } else {
                         0.5 // default to centering
                     };
 
                     let src_id = if let Some(id) = edge_group.custom.get("efferent_swc_id") {
-                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent id {id:?}", edge_population.name);
+                        bail!(
+                            "[UNSUPPORTED] Edge type {type_id} in population {} has efferent id {id:?}",
+                            edge_population.name
+                        );
                         // ds[group_index]
                     } else if let Some(id) = ty.attributes.get("efferent_swc_id") {
-                        bail!("[UNSUPPORTED] Edge type {type_id} in population {} has efferent SWC id {id:?}", edge_population.name);
+                        bail!(
+                            "[UNSUPPORTED] Edge type {type_id} in population {} has efferent SWC id {id:?}",
+                            edge_population.name
+                        );
                         // if let Attribute::Float(s) = s {
                         // *s
                         // } else {
