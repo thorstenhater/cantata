@@ -181,16 +181,6 @@ if have_timing:
 else:
     timing = TimingNull()
 
-
-def open_sim():
-    with open(here / "dat/sim.cbor", "rb") as fd:
-        return load_data(fd)
-
-
-def close_sim(raw):
-    del raw
-
-
 def read_int_dict(raw, key):
     res = raw[key]
     assert isinstance(res, dict)
@@ -221,18 +211,13 @@ def read_float(raw, key):
     return res
 
 
-class recipe(A.recipe):
-    def __init__(self):
-        A.recipe.__init__(self)
+class Chunk:
+    def __init__(self, chunk, start, threshold):
+        with open(here / f"dat/chunk-{chunk}.cbor", "rb") as fd:
+            data = load_data(fd)
 
-        data = open_sim()
-
-        # Some initial, global data
-        self.N = read_int(data, "size")
-        self.T = read_float(data, "time")
-        self.dt = read_float(data, "time_step")
-        self.threshold = read_float(data, "spike_threshold")
-
+        # first gid in chunk
+        self.start = start
         # gid -> (morphology id, acc id)
         self.gid_to_bio = read_int_dict(data, "cell_bio_ids")
         # gid -> lif cell data
@@ -255,8 +240,26 @@ class recipe(A.recipe):
         self.gid_to_icp = read_int_dict(data, "current_clamps")
         # probes
         self.gid_to_prb = read_int_dict(data, "probes")
-        # cell kind specific counts
-        self.kind_to_count = read_array(data, "count_by_kind")
+        # spiking threshold
+        self.threshold = threshold
+        
+        del data
+
+        
+class recipe(A.recipe):
+    def __init__(self):
+        A.recipe.__init__(self)
+
+        with open(here / "dat/sim.cbor", "rb") as fd:
+            data = load_data(fd)
+        
+
+        # Some initial, global data
+        self.N = read_int(data, "size")
+        self.T = read_float(data, "time")
+        self.dt = read_float(data, "time_step")
+        self.threshold = read_float(data, "spike_threshold")
+        self.chunk_size = read_int(data, "chunk_size")
 
         # convert raw data into things we handle
         self.cable_props = A.neuron_cable_properties()
@@ -272,53 +275,39 @@ class recipe(A.recipe):
         else:
             self.cv_policy = A.cv_policy_single()
         # clean-up...
-        close_sim(data)
-        # caches some data
-        self.cable_data = {}
+        del data
 
-    def cell_kind(self, gid):
-        kind = self.gid_to_kid[gid]
-        if kind == 0:
-            return A.cell_kind.cable
-        elif kind == 1:
-            return A.cell_kind.lif
-        elif kind == 2:
-            return A.cell_kind.spike_source
-        else:
-            raise RuntimeError("Unknown cell kind")
+        # caches some data
+        self.chunks = {}
+        self.mrfs = {}
+        self.accs = {}
+
 
     def num_cells(self):
         return self.N
 
-    def connections_on(self, gid):
-        if not gid in self.gid_to_inc:
-            return []
-        return [
-            A.connection((src, f"src-{lbl}"), f"syn-{tgt}", w, max(d, self.dt) * U.ms)
-            for src, lbl, tgt, w, d in self.gid_to_inc[gid]
-        ]
-
+    def _get_chunk(self, gid):
+        idx = gid // self.chunk_size
+        if idx not in self.chunks:
+            self.chunks[idx] = Chunk(idx, idx*self.chunk_size, self.threshold)
+        return self.chunks[idx]
+    
     def global_properties(self, kind):
         if kind == A.cell_kind.cable:
             return self.cable_props
         return None
 
-    def cell_description(self, gid):
-        kind = self.gid_to_kid[gid]
-        if kind == 0:
-            return self.make_cable_cell(gid)
-        elif kind == 1:
-            return self.make_lif_cell(gid)
-        elif kind == 2:
-            return self.make_vrt_cell(gid)
-        else:
-            raise RuntimeError("Unknown cell kind")
+    def cell_kind(self, gid):
+        chunk = self._get_chunk(gid)
+        res = chunk.gid_to_kid[gid - chunk.start]
+        return [A.cell_kind.cable, A.cell_kind.lif, A.cell_kind.spike_source][res]
 
     def probes(self, gid):
         res = []
-        if gid in self.gid_to_prb:
+        chunk = self._get_chunk(gid)
+        if gid in chunk.gid_to_prb:
             kind = self.cell_kind(gid)
-            for loc, var, tag in self.gid_to_prb[gid]:
+            for loc, var, tag in chunk.gid_to_prb[gid]:
                 tag = f"probe-{tag}"
                 if kind == A.cell_kind.cable:
                     loc = f'(on-components 0.5 (region "{loc}"))'
@@ -345,7 +334,7 @@ class recipe(A.recipe):
 
     def make_cable_cell(self, gid):
         mrf, dec = self.load_cable_data(gid)
-        
+        chunk = self._get_chunk(gid)
         # Find the soma center in the SWC coordinates
         ctr = '(support (on-components 0.5 (tag 1)))'
         off = A.morphology_provider(mrf).reify_locset(ctr)[0]
@@ -353,19 +342,21 @@ class recipe(A.recipe):
         swc_pos = A.isometry.translate(dp.x, dp.y, dp.z)
 
         # The position SONATA places the soma at
-        x, y, z = rec.gid_to_meta[gid]["position"]
+        meta = chunk.gid_to_meta[gid]
+
+        x, y, z = meta["position"]
         son_ipos = A.isometry.translate(-x, -y, -z)
 
         # The rotation applied by SONATA
-        xrot, yrot, zrot = rec.gid_to_meta[gid]["rotation"]
+        xrot, yrot, zrot = meta["rotation"]
         son_irot = A.isometry.rotate(-xrot, 1, 0, 0) * A.isometry.rotate(-yrot, 0, 1, 0) * A.isometry.rotate(-zrot, 0, 0, 1)
         pwl = A.place_pwlin(mrf)
                         
         
         lbl = A.label_dict().add_swc_tags()
-        if gid in self.gid_to_syn:
+        if gid in chunk.gid_to_syn:
             max_ds = 0
-            for x, y, z, synapse, params, tag in self.gid_to_syn[gid]:
+            for x, y, z, synapse, params, tag in chunk.gid_to_syn[gid]:
                 # undo SONATA transformations, shift into SWC coordinates
                 u, v, w = swc_pos(son_irot(son_ipos((x, y, z))))
                 loc, ds = pwl.closest(u, v, w)
@@ -374,10 +365,10 @@ class recipe(A.recipe):
                 
             # Trip wire in the case a synapse deviates from the expected position
             if max_ds > 0.1:
-                print(f"[WARN] on cell {gid}  a synapses was displaced by {max_ds}um > 0.1um")
+                print(f"[WARN] on cell {gid} a synapse (out of {len(chunk.gid_to_syn[gid])}) was displaced by {max_ds}um > 0.1um")
             
-        if gid in self.gid_to_icp:
-            for loc, delay, duration, amplitude, tag in self.gid_to_icp[gid]:
+        if gid in chunk.gid_to_icp:
+            for loc, delay, duration, amplitude, tag in chunk.gid_to_icp[gid]:
                 dec.place(
                     loc,
                     A.iclamp(
@@ -436,9 +427,19 @@ class recipe(A.recipe):
 
         return A.cable_cell(mrf, dec, lbl, self.cv_policy)
 
+    def connections_on(self, gid):
+        chunk = self._get_chunk(gid)
+        if gid not in chunk.gid_to_inc:
+            return []
+        return [
+            A.connection((src, f"src-{lbl}"), f"syn-{tgt}", w, max(d, self.dt) * U.ms)
+            for src, lbl, tgt, w, d in chunk.gid_to_inc[gid]
+        ]    
+    
     def make_lif_cell(self, gid):
         cell = A.lif_cell("src-0", "syn-0")
-        data = self.gid_to_lif[gid]
+        chunk = self._get_chunk(gid)
+        data = chunk.gid_to_lif[gid]
         # setup the cell to adhere to NEURON's defaults
         cell.C_m = 0.6 * data["cm"] * U.pF
         cell.tau_m = data["tau"] * U.ms
@@ -450,22 +451,38 @@ class recipe(A.recipe):
         return cell
 
     def make_vrt_cell(self, gid):
+        data = self._get_chunk(gid).gid_to_vrt[gid]
+        print("virt spikes", gid, len(data))
         return A.spike_source_cell(
-            "src-0", A.explicit_schedule([t * U.ms for t in self.gid_to_vrt[gid]])
+            "src-0", A.explicit_schedule([t * U.ms for t in data])
         )
 
     def load_cable_data(self, gid):
-        mid, cid = self.gid_to_bio[gid]
-        if gid not in self.cable_data:
+        chunk = self._get_chunk(gid)
+        mid, cid = chunk.gid_to_bio[gid]
+        if mid not in self.mrfs:
             timing.tic("build/simulation/io")
-            mrf = load_morphology(here / "mrf" / self.mid_to_mrf[mid])
-            dec = A.load_component(here / "acc" / self.cid_to_acc[cid]).component
-            self.cable_data[gid] = (mrf, dec)
+            self.mrfs[mid] = load_morphology(here / "mrf" / chunk.mid_to_mrf[mid])
+        if cid not in self.accs:
+            self.accs[cid] = A.load_component(here / "acc" / chunk.cid_to_acc[cid]).component
             timing.toc("build/simulation/io")
-        mrf, dec = self.cable_data[gid]
-        return mrf, A.decor(dec)  # NOTE copy that decor!!
+        return self.mrfs[mid], A.decor(self.accs[cid])  # NOTE copy that decor!!
 
-
+    def cell_description(self, gid):
+        chunk = self._get_chunk(gid)
+        kid = chunk.gid_to_kid[gid - chunk.start]
+        if kid == 0:
+            print(gid, 'CABLE')
+            return self.make_cable_cell(gid)
+        elif kid == 1:
+            print(gid, 'LIF')
+            return self.make_lif_cell(gid)
+        elif kid == 2:
+            print(gid, 'SOURCE')
+            return self.make_vrt_cell(gid)
+        else:
+            raise RuntimeError(f"Unknown kind for gid={gid}")
+        
 timing.tic("build/recipe")
 rec = recipe()
 timing.toc("build/recipe")
@@ -484,16 +501,8 @@ if have_gpu:
     if comm:
         gpu = A.env.find_private_gpu(comm)
 
-ctx = A.context(gpu_id=gpu, mpi=comm)
-hints = {}
-for kind, tag in zip(
-    [A.cell_kind.cable, A.cell_kind.lif, A.cell_kind.spike_source], [0, 1, 2]
-):
-    if tag in rec.kind_to_count:
-        hints[kind] = A.partition_hint(
-            cpu_group_size=int(ceil(rec.kind_to_count[tag] / ctx.threads))
-        )
-ddc = A.partition_load_balance(rec, ctx, hints)
+ctx = A.context(gpu_id=gpu, mpi=comm, threads=4)
+ddc = A.partition_load_balance(rec, ctx)
 sim = A.simulation(rec, context=ctx, domains=ddc)
 timing.toc("build/simulation")
 
@@ -503,7 +512,8 @@ sim.record(A.spike_recording.all)
 schedule = A.regular_schedule(tstart=0 * U.ms, dt=rec.dt * U.ms)
 handles = {
     (gid, tag): sim.sample((gid, f"probe-{tag}"), schedule=schedule)
-    for gid, prbs in rec.gid_to_prb.items()
+    for chunk in rec.chunks.values()
+    for gid, prbs in chunk.gid_to_prb.items()
     for _, _, tag in prbs
 }
 timing.toc("build/sampling")
@@ -521,9 +531,9 @@ df = pd.DataFrame(
         "lid": spikes["source"]["index"],
     }
 )
-df["kind"] = df["gid"].map(lambda i: rec.gid_to_kid[i])
-df["population"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["population"])
-df["type"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["type_id"])
+# df["kind"] = df["gid"].map(lambda i: rec.gid_to_kid[i])
+# df["population"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["population"])
+# df["type"] = df["gid"].map(lambda i: rec.gid_to_meta[i]["type_id"])
 df.to_csv(here / "out" / "spikes.csv")
 timing.toc("output/spikes")
 
@@ -550,57 +560,5 @@ for (gid, tag), handle in handles.items():
         fg.savefig(here / "out" / f"gid_{gid}-tag_{tag}.pdf")
         plt.close(fg)
 timing.toc("output/samples")
-
-if have_stats:
-    timing.tic("output/statistics")
-    N = rec.num_cells()
-
-    cells = defaultdict(lambda: defaultdict(lambda: 0))
-    spike = defaultdict(lambda: defaultdict(lambda: 0))
-    conns = defaultdict(lambda: 0)
-
-    for gid in range(N):
-        meta = rec.gid_to_meta[gid]
-        pop = meta["population"]
-        kind = meta["type_id"]
-        cells[pop][kind] += 1
-        cells[pop][-1] += 1
-        for conn in rec.connections_on(gid):
-            src = rec.gid_to_meta[conn.source.gid]["population"]
-            conns[(src, pop)] += 1
-
-    for (gid, _), _ in spikes:
-        meta = rec.gid_to_meta[gid]
-        pop = meta["population"]
-        kind = meta["type_id"]
-        spike[pop][kind] += 1
-        spike[pop][-1] += 1
-    C = sum(conns.values())
-    timing.toc("output/statistics")
-
-    print(
-        f"""
-Statistics
-==========
-
-* Cells                  {N:>13}"""
-    )
-    for pop, kinds in cells.items():
-        print(f"  * {pop:<20} {kinds[-1]:>13}")
-        for kind, num in kinds.items():
-            if kind == -1:
-                continue
-            print(f"    * {kind:<18} {num:>13}")
-    print(f"* Connections            {C:>13}")
-    for (src, tgt), num in conns.items():
-        print(f"  * {src:<8} -> {tgt:<8} {num:>13}")
-    print(f"* Spikes                 {len(spikes):>13}")
-    for pop, kinds in spike.items():
-        print(f"  * {pop:<20} {kinds[-1]:>13}")
-        for kind, num in kinds.items():
-            if kind == -1:
-                continue
-            print(f"    * {kind:<18} {num:>13}")
-
 
 timing.report()

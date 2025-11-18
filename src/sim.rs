@@ -8,6 +8,7 @@ use crate::{
 use anyhow::{anyhow, bail};
 use hdf5_metno as hdf5;
 use serde::{Deserialize, Serialize};
+use tracing::{event, span, Level};
 use std::{fs::File, str::FromStr};
 
 /// Model types currently known to SONATA
@@ -61,7 +62,7 @@ pub enum ModelType {
     #[serde(rename = "virtual")]
     Virtual {
         #[serde(flatten)]
-        attributes: Map<String, Attribute>,
+        attributes: Map<Box<str>, Attribute>,
     },
 }
 
@@ -81,7 +82,7 @@ pub struct NodeType {
     /// unique -- within population -- id of this type. Used in instances to
     /// reference this type.
     #[serde(rename = "node_type_id")]
-    pub type_id: u64,
+    pub type_id: u32,
     /// population using this type. Might be given by instance file, this, or
     /// both
     #[serde(rename = "pop_name")]
@@ -118,7 +119,7 @@ impl NodeType {
 
 #[derive(Debug)]
 pub struct ParameterGroup {
-    pub id: u64,
+    pub id: u32,
     pub dynamics: Map<Box<str>, Vec<f64>>,
     pub custom: Map<Box<str>, Vec<f64>>,
 }
@@ -156,10 +157,10 @@ pub struct ParameterGroup {
 pub struct NodePopulation {
     pub name: Box<str>,
     pub size: usize,
-    pub type_ids: Vec<u64>,
-    pub node_ids: Vec<u64>,
-    pub group_ids: Vec<u64>,
-    pub group_indices: Vec<usize>,
+    pub type_ids: Vec<u32>,
+    pub node_ids: Vec<u32>,
+    pub group_ids: Vec<u32>,
+    pub group_indices: Vec<u32>,
     pub groups: Vec<ParameterGroup>,
 }
 
@@ -176,7 +177,10 @@ impl NodeList {
             .map_err(anyhow::Error::from)
             .and_then(|p| p.canonicalize().map_err(anyhow::Error::from))
             .with_context(|| format!("Resolving node types {path}"))?;
-        let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(&path).with_context(|| format!("Opening {path:?}"))?);
+        let rd = std::io::BufReader::with_capacity(
+            1 * 1024 * 1024,
+            File::open(&path).with_context(|| format!("Opening {path:?}"))?,
+        );
         let mut tys = csv::ReaderBuilder::new()
             .delimiter(b' ')
             .from_reader(rd)
@@ -199,22 +203,22 @@ impl NodeList {
         let mut pops = Vec::new();
         for population in &populations {
             let name = population.name().rsplit_once('/').unwrap().1.to_string();
-            let type_ids = get_dataset::<u64>(population, "node_type_id")?;
+            let type_ids = get_dataset::<u32>(population, "node_type_id")?;
             let size = type_ids.len();
-            let node_ids = get_dataset::<u64>(population, "node_id")
-                .unwrap_or_else(|_| (0..size as u64).collect::<Vec<_>>());
+            let node_ids = get_dataset::<u32>(population, "node_id")
+                .unwrap_or_else(|_| (0..size as u32).collect::<Vec<_>>());
             if size != node_ids.len() {
                 anyhow::bail!(
                     "Population {name} in {path:?} has mismatched #type_ids ./. #node_ids"
                 )
             }
-            let group_ids = get_dataset::<u64>(population, "node_group_id")?;
+            let group_ids = get_dataset::<u32>(population, "node_group_id")?;
             if size != group_ids.len() {
                 anyhow::bail!(
                     "Population {name} in {path:?} has mismatched #type_ids ./. #group_id"
                 )
             }
-            let group_indices = get_dataset::<usize>(population, "node_group_index")?;
+            let group_indices = get_dataset::<u32>(population, "node_group_index")?;
             if size != group_indices.len() {
                 anyhow::bail!(
                     "Population {name} in {path:?} has mismatched #type_ids ./. #group_index"
@@ -242,7 +246,7 @@ impl NodeList {
                     }
 
                     groups.push(ParameterGroup {
-                        id: group_id as u64,
+                        id: group_id as u32,
                         dynamics,
                         custom,
                     });
@@ -272,10 +276,10 @@ impl NodeList {
 /// - edge_type_id; required
 /// - population; required either in CSV or H5; handles populations defining the same edge_type_id
 /// - any number of additional columns may freely be added.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct EdgeType {
     #[serde(rename = "edge_type_id")]
-    pub type_id: u64,
+    pub type_id: u32,
     #[serde(rename = "pop_name")]
     pub population: Option<String>,
     #[serde(flatten)]
@@ -285,10 +289,29 @@ struct EdgeType {
 }
 
 impl EdgeType {
-    fn clean_up(&mut self) {
+    fn clean_up_mut(&mut self) {
         self.attributes
             .retain(|_, v| !matches!(v, Attribute::String(s) if s == "NULL"));
     }
+    fn clean_up(mut self) -> Self {
+        self.clean_up_mut();
+        self
+    }
+}
+
+/// Parameters of an EdgeGroup
+#[derive(Debug)]
+struct EdgeGroup {
+    pub id: u32,
+    // afferent position in 3d
+    pub x: Option<Vec<f64>>,
+    pub y: Option<Vec<f64>>,
+    pub z: Option<Vec<f64>>,
+    // synaptic weight
+    pub weight: Option<Vec<f32>>,
+    pub delay: Option<Vec<f32>>,
+    // custom dynamics
+    pub dynamics: Map<Box<str>, Vec<f64>>,
 }
 
 /// Populations are stored HDF5 files, and have an associated edge types file to
@@ -333,17 +356,139 @@ impl EdgeType {
 struct EdgePopulation {
     name: String,
     size: usize,
-    type_ids: Vec<u64>,
-    group_ids: Vec<u64>,
-    source_ids: Vec<u64>,
+    type_ids: Vec<u32>,
+    group_ids: Vec<u32>,
+    source_ids: Vec<u32>,
     source_pop: String,
-    target_ids: Vec<u64>,
+    target_ids: Vec<u32>,
     target_pop: String,
-    group_indices: Vec<usize>,
-    groups: Vec<ParameterGroup>,
+    group_indices: Vec<u32>,
+    groups: Vec<EdgeGroup>,
 }
 
-#[derive(Debug)]
+impl EdgePopulation {
+    fn new(population: &hdf5::Group) -> Result<Self> {
+        let name = population.name().rsplit_once('/').unwrap().1.to_string();
+        span!(Level::INFO, "edge population {name}");
+        let type_ids = get_dataset(population, "edge_type_id")?;
+        let size = type_ids.len();
+        let group_ids = get_dataset::<u32>(population, "edge_group_id")?;
+        if size != group_ids.len() {
+            anyhow::bail!("Population {name} has mismatched #type_ids ./. #group_id")
+        }
+        let group_indices = get_dataset::<u32>(population, "edge_group_index")?;
+        if size != group_indices.len() {
+            anyhow::bail!("Population {name} has mismatched #type_ids ./. #group_index")
+        }
+        let sources = population
+            .dataset("source_node_id")
+            .with_context(|| format!("Extracting source indices from population {name}"))?;
+        let source_ids = sources.read_1d::<u32>()?.to_vec();
+        if size != source_ids.len() {
+            anyhow::bail!("Population {name} has mismatched #type_ids ./. #source_ids")
+        }
+        let source_pop = sources
+            .attr("node_population")
+            .with_context(|| {
+                format!("Extracting source population from population {name}; not found")
+            })?
+            .read_scalar::<hdf5::types::VarLenUnicode>()
+            .with_context(|| {
+                format!("Extracting source population from population {name}; not a string")
+            })?
+            .as_str()
+            .to_string();
+        let targets = population
+            .dataset("target_node_id")
+            .with_context(|| format!("Extracting target indices from population {name}"))?;
+
+        let target_ids = targets.read_1d::<u32>()?.to_vec();
+        let target_pop = targets
+            .attr("node_population")
+            .with_context(|| {
+                format!("Extracting target population from population {name}; not found")
+            })?
+            .read_scalar::<hdf5::types::VarLenUnicode>()
+            .with_context(|| {
+                format!("Extracting target population from population {name}; not a string")
+            })?
+            .as_str()
+            .to_string();
+        if size != target_ids.len() {
+            anyhow::bail!("Population {name} has mismatched #type_ids ./. #target_ids")
+        }
+        event!(name: "Edges", Level::INFO, "{name} #edges={size}");
+        let mut group_id = 0;
+        let mut groups = Vec::new();
+        while let Ok(group) = population.group(&format!("{group_id}")) {
+            event!(name: "EdgeGroup", Level::INFO, "group={group_id}");
+            let mut dynamics = Map::new();
+            if let Ok(dynamics_params) = group.group("dynamics_params") {
+                for param in dynamics_params.datasets()?.iter() {
+                    println!("   * name={} size={} ", param.name(), param.size());
+                    let values = param.read_1d::<f64>()?.to_vec();
+                    let name: Box<str> = param.name().rsplit_once('/').unwrap().1.into();
+                    dynamics.insert(name, values);
+                }
+            }
+            let x = group.dataset("afferent_section_xcoords").ok().map(|ds| {
+                ds.read_1d::<f64>()
+                    .expect(&format!("Extracting group position from id {group_id}"))
+                    .to_vec()
+            });
+
+            let y = group.dataset("afferent_section_ycoords").ok().map(|ds| {
+                ds.read_1d::<f64>()
+                    .expect(&format!("Extracting group position from id {group_id}"))
+                    .to_vec()
+            });
+
+            let z = group.dataset("afferent_section_zcoords").ok().map(|ds| {
+                ds.read_1d::<f64>()
+                    .expect(&format!("Extracting group position from id {group_id}"))
+                    .to_vec()
+            });
+
+            let weight = group.dataset("syn_weight").ok().map(|ds| {
+                ds.read_1d::<f32>()
+                    .expect(&format!("Extracting group position from id {group_id}"))
+                    .to_vec()
+            });
+
+            let delay = group.dataset("delay").ok().map(|ds| {
+                ds.read_1d::<f32>()
+                    .expect(&format!("Extracting group position from id {group_id}"))
+                    .to_vec()
+            });
+
+            groups.push(EdgeGroup {
+                id: group_id,
+                x,
+                y,
+                z,
+                delay,
+                weight,
+                dynamics,
+            });
+            group_id += 1;
+        }
+
+        Ok(Self {
+            name,
+            size,
+            type_ids,
+            group_ids,
+            source_ids,
+            source_pop,
+            target_ids,
+            target_pop,
+            group_indices,
+            groups,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct EdgeList {
     types: Vec<EdgeType>,
     populations: Vec<EdgePopulation>,
@@ -363,15 +508,18 @@ impl EdgeList {
             .map_err(anyhow::Error::from)
             .and_then(|p| p.canonicalize().map_err(anyhow::Error::from))
             .with_context(|| format!("Resolving edge types {path}"))?;
-        let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(&path).with_context(|| format!("Opening {path:?}"))?);
-        let mut tys = csv::ReaderBuilder::new()
+        let rd = std::io::BufReader::with_capacity(
+            1 * 1024 * 1024,
+            File::open(&path).with_context(|| format!("Opening {path:?}"))?,
+        );
+        let types = csv::ReaderBuilder::new()
             .delimiter(b' ')
             .from_reader(rd)
             .deserialize()
-            .map(|it| it.map_err(anyhow::Error::from))
+            .map(|it| it.map(EdgeType::clean_up).map_err(anyhow::Error::from))
             .collect::<Result<Vec<EdgeType>>>()
             .with_context(|| format!("Parsing edge types {path:?}"))?;
-        tys.iter_mut().for_each(|nt| nt.clean_up());
+
         let path = &edges.edges;
         let path = std::path::PathBuf::from_str(&edges.edges)
             .map_err(anyhow::Error::from)
@@ -381,137 +529,22 @@ impl EdgeList {
         let edges = edge_instance_file.group("edges")?;
         let populations = edges
             .groups()
-            .with_context(|| "Opening population list".to_string())?;
-
-        let mut pops = Vec::new();
-        for population in &populations {
-            let name = population.name().rsplit_once('/').unwrap().1.to_string();
-            let type_ids = get_dataset(population, "edge_type_id")?;
-            let size = type_ids.len();
-            let edge_ids = get_dataset::<u64>(population, "edge_id")
-                .unwrap_or_else(|_| (0..size as u64).collect::<Vec<_>>());
-            if size != edge_ids.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #edge_ids"
-                )
-            }
-            let group_ids = get_dataset::<u64>(population, "edge_group_id")?;
-            if size != group_ids.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #group_id"
-                )
-            }
-            let group_indices = get_dataset::<usize>(population, "edge_group_index")?;
-            if size != group_indices.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #group_index"
-                )
-            }
-            let sources = population
-                .dataset("source_node_id")
-                .with_context(|| format!("Extracting source indices from population {name}"))?;
-            let source_ids = sources.read_1d::<u64>()?.to_vec();
-            if size != source_ids.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #source_ids"
-                )
-            }
-            let source_pop = sources
-                .attr("node_population")
-                .with_context(|| {
-                    format!("Extracting source population from population {name}; not found")
-                })?
-                .read_scalar::<hdf5::types::VarLenUnicode>()
-                .with_context(|| {
-                    format!("Extracting source population from population {name}; not a string")
-                })?
-                .as_str()
-                .to_string();
-            let targets = population
-                .dataset("target_node_id")
-                .with_context(|| format!("Extracting target indices from population {name}"))?;
-
-            let target_ids = targets.read_1d::<u64>()?.to_vec();
-            let target_pop = targets
-                .attr("node_population")
-                .with_context(|| {
-                    format!("Extracting target population from population {name}; not found")
-                })?
-                .read_scalar::<hdf5::types::VarLenUnicode>()
-                .with_context(|| {
-                    format!("Extracting target population from population {name}; not a string")
-                })?
-                .as_str()
-                .to_string();
-            if size != target_ids.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #target_ids"
-                )
-            }
-
-            let group_indices = get_dataset::<usize>(population, "edge_group_index")?;
-            if size != group_indices.len() {
-                anyhow::bail!(
-                    "Population {name} in {path:?} has mismatched #type_ids ./. #group_index"
-                )
-            }
-            let mut groups = Vec::new();
-            let mut group_id = 0;
-            loop {
-                if let Ok(group) = population.group(&format!("{group_id}")) {
-                    let mut dynamics = Map::new();
-                    let mut custom = Map::new();
-                    if let Ok(dynamics_params) = group.group("dynamics_params") {
-                        for param in dynamics_params.datasets()?.iter() {
-                            let values = param.read_1d::<f64>()?.to_vec();
-                            let name: Box<str> = param.name().rsplit_once('/').unwrap().1.into();
-                            dynamics.insert(name, values);
-                        }
-                    }
-                    for param in group.datasets()?.iter() {
-                        let values = param.read_1d::<f64>()?.to_vec();
-                        let name = param.name().rsplit_once('/').unwrap().1.into();
-                        custom.insert(name, values);
-                    }
-
-                    groups.push(ParameterGroup {
-                        id: group_id,
-                        dynamics,
-                        custom,
-                    });
-                } else {
-                    break;
-                }
-                group_id += 1;
-            }
-            pops.push(EdgePopulation {
-                name,
-                size,
-                type_ids,
-                group_ids,
-                source_ids,
-                target_ids,
-                source_pop,
-                target_pop,
-                groups,
-                group_indices,
-            })
-        }
-        Ok(Self {
-            types: tys,
-            populations: pops,
-        })
+            .with_context(|| "Opening population list".to_string())?
+            .iter()
+            .map(EdgePopulation::new)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { types, populations })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct Edge {
-    pub src_gid: u64,
-    pub source: (u64, f64),
+    pub src_gid: u32,
+    pub source: (u32, f64),
     pub target: (f64, f64, f64),
     pub mech: Option<String>,
-    pub delay: f64,
-    pub weight: f64,
+    pub delay: f32,
+    pub weight: f32,
     pub dynamics: Map<Box<str>, f64>,
 }
 
@@ -523,13 +556,13 @@ pub struct Node {
     /// owning population
     pub pop: Box<str>,
     /// id within the population
-    pub node_id: u64,
+    pub node_id: u32,
     /// id of containing group.
-    pub group_id: u64,
+    pub group_id: u32,
     /// index within the group
-    pub group_index: usize,
+    pub group_index: u32,
     /// id of node type in population used to instantiate.
-    pub node_type_id: u64,
+    pub node_type_id: u32,
     /// node type used to instantiate
     pub node_type: NodeType,
     /// Dynamics parameters extracted from the population.
@@ -594,9 +627,9 @@ pub struct Simulation {
     /// raw-ish edge data
     pub edge_lists: Vec<EdgeList>,
     /// GID from (population, id)
-    pub node_population_to_gid: Map<(usize, u64), u64>,
+    pub node_population_to_gid: Map<(usize, u32), u32>,
     /// GID to (population, id)
-    pub gid_to_node_population: Vec<(usize, u64)>,
+    pub gid_to_node_population: Vec<(usize, u32)>,
     /// node population list, to avoid copying strings and storing the indices
     /// into node_list and population.
     pub node_populations: Vec<PopId>,
@@ -605,15 +638,15 @@ pub struct Simulation {
     /// Number of total cells
     pub size: usize,
     /// reportable variables per population id
-    pub reports: Map<u64, Vec<Probe>>,
+    pub reports: Map<u32, Vec<Probe>>,
     /// current clamps
-    pub iclamps: Map<u64, Vec<IClamp>>,
+    pub iclamps: Map<u32, Vec<IClamp>>,
     /// CV discretization
     pub cv_policy: CVPolicy,
     /// threshold for spike generation
     pub spike_threshold: f64,
     /// virtual cell spikes
-    pub virtual_spikes: Map<String, Map<u64, Vec<f64>>>,
+    pub virtual_spikes: Map<String, Map<u32, Vec<f64>>>,
     /// cable cell global properties
     pub global_properties: Option<GlobalProperties>,
     /// components for delayed/lazy lookup
@@ -648,8 +681,8 @@ pub struct IClamp {
 fn read_virtual_spikes(
     components: &Components,
     inputs: &raw::Inputs,
-) -> Result<Map<String, Map<u64, Vec<f64>>>> {
-    let mut res: Map<String, Map<u64, Vec<f64>>> = Map::new();
+) -> Result<Map<String, Map<u32, Vec<f64>>>> {
+    let mut res: Map<String, Map<u32, Vec<f64>>> = Map::new();
     for input in inputs.values() {
         if let raw::Input::Spikes {
             module,
@@ -675,7 +708,7 @@ fn read_virtual_spikes(
                         );
                     }
                     for (id, ts) in nodes.iter().zip(times.iter()) {
-                        data.entry(*id as u64).or_default().push(*ts);
+                        data.entry(*id as u32).or_default().push(*ts);
                     }
                 }
             } else {
@@ -688,26 +721,19 @@ fn read_virtual_spikes(
 
 impl Simulation {
     pub fn new(sim: &raw::Simulation) -> Result<Self> {
-        let mut node_lists = sim
-            .network
-            .nodes
-            .iter()
-            .map(NodeList::new)
-            .collect::<Result<Vec<_>>>()?;
-        let mut edge_lists = sim
-            .network
-            .edges
-            .iter()
-            .map(EdgeList::new)
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut start = 0;
+        span!(Level::INFO, "Building simulation from raw");
+        let mut edge_lists = Vec::new();
         let mut edge_populations = Vec::new();
-        for (lid, edge_list) in edge_lists.iter_mut().enumerate() {
+        let mut start = 0;
+        for (lid, edges) in sim.network.edges.iter().enumerate() {
+            let mut edge_list = EdgeList::new(edges)?;
             for ty in edge_list.types.iter_mut() {
                 if let Some(Attribute::String(name)) = ty.attributes.get("dynamics_params") {
                     let fname = find_component(name, &sim.components)?;
-                    let fdata = std::io::BufReader::with_capacity(1*1024*1024, std::fs::File::open(fname)?);
+                    let fdata = std::io::BufReader::with_capacity(
+                        1 * 1024 * 1024,
+                        std::fs::File::open(fname)?,
+                    );
                     let fdata: Map<Box<str>, serde_json::Value> = serde_json::from_reader(fdata)
                         .with_context(|| format!("Parsing JSON from {name}"))?;
                     let mut param = fdata
@@ -721,13 +747,21 @@ impl Simulation {
                 edge_populations.push(PopId::new_edges(lid, pid, start, population)?);
                 start += population.size;
             }
+            edge_lists.push(edge_list);
         }
+
         let mut gid = 0;
         let mut start = 0;
         let mut node_population_to_gid = Map::new();
         let mut node_population_ids = Map::new();
         let mut gid_to_node_population = Vec::new();
         let mut node_populations = Vec::new();
+        let mut node_lists = sim
+            .network
+            .nodes
+            .iter()
+            .map(NodeList::new)
+            .collect::<Result<Vec<_>>>()?;
         for (lid, node_list) in node_lists.iter_mut().enumerate() {
             for ty in node_list.types.iter_mut() {
                 match &ty.model_type {
@@ -737,14 +771,17 @@ impl Simulation {
                     | ModelType::Virtual { attributes, .. } => {
                         if let Some(Attribute::String(name)) = attributes.get("dynamics_params") {
                             let fname = find_component(name, &sim.components)?;
-                            let fdata = std::io::BufReader::with_capacity(1*1024*1024, std::fs::File::open(fname)?);
+                            let fdata = std::io::BufReader::with_capacity(
+                                1 * 1024 * 1024,
+                                std::fs::File::open(fname)?,
+                            );
                             let fdata =
-                                serde_json::from_reader::<_, Map<String, serde_json::Value>>(
-                                    fdata,
-                                )
-                                .with_context(|| format!("Parsing JSON from {name}"))?
-                                .into_iter()
-                                .filter_map(|(k, v)| v.as_f64().map(|v| (k.into_boxed_str(), v)));
+                                serde_json::from_reader::<_, Map<String, serde_json::Value>>(fdata)
+                                    .with_context(|| format!("Parsing JSON from {name}"))?
+                                    .into_iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_f64().map(|v| (k.into_boxed_str(), v))
+                                    });
                             ty.dynamics.extend(fdata);
                         }
                     }
@@ -778,6 +815,8 @@ impl Simulation {
                 None
             };
 
+        event!(name: "Raw2SimDone", Level::INFO, "Instantiated simulation with {start} nodes.");
+        
         let mut res = Self {
             tfinal: sim.run.tstop,
             dt: sim.run.dt,
@@ -793,7 +832,7 @@ impl Simulation {
             virtual_spikes,
             global_properties,
             components: sim.components.clone(),
-            size: start,
+            size: std::cmp::min(start, 2000),
             spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
         };
 
@@ -883,7 +922,7 @@ impl Simulation {
         Ok(())
     }
 
-    fn resolve_nodeset(&self, cells: &raw::NodeSet) -> Result<Vec<u64>> {
+    fn resolve_nodeset(&self, cells: &raw::NodeSet) -> Result<Vec<u32>> {
         let res = match cells {
             raw::NodeSet::Name(nm) => {
                 let pid = self
@@ -891,7 +930,7 @@ impl Simulation {
                     .get(nm.as_str())
                     .ok_or(anyhow!("Unkown population <{nm}>"))?;
                 let PopId { start, size, .. } = self.node_populations[*pid];
-                (start..start + size).map(|i| i as u64).collect()
+                (start..start + size).map(|i| i as u32).collect()
             }
             raw::NodeSet::Basic { population, rules } => {
                 let mut res = Vec::new();
@@ -937,7 +976,7 @@ impl Simulation {
                         }
                     }
                     if pred {
-                        res.push(gid as u64);
+                        res.push(gid as u32);
                     }
                 }
                 res
@@ -959,7 +998,10 @@ impl Simulation {
             .gid_to_node_population
             .get(gid)
             .ok_or_else(|| anyhow!("Unknown gid {gid}, must be in [0, {})", self.size))?;
-        let node_pop_id = self.node_populations.get(*node_pop_idx).expect("Unknown population");
+        let node_pop_id = self
+            .node_populations
+            .get(*node_pop_idx)
+            .expect("Unknown population");
         let node_list = &self.node_lists[node_pop_id.list_index];
         let node_population = &node_list.populations[node_pop_id.pop_index];
         let target_population = &node_population.name;
@@ -1033,20 +1075,60 @@ impl Simulation {
                         .get(edge_index)
                         .ok_or_else(edge_index_error)?;
 
-                    let delay = if let Some(ds) = edge_group.custom.get("delay") {
-                        ds[group_index]
+                    let delay = if let Some(ds) = edge_group.delay.as_ref() {
+                        ds[group_index as usize]
                     } else if let Some(Attribute::Float(d)) = ty.attributes.get("delay") {
-                        *d
+                        *d as f32
                     } else {
                         bail!(
                             "Edge {type_id} in population {} has no delay",
                             edge_population.name
                         )
                     };
-                    let weight = if let Some(ds) = edge_group.custom.get("syn_weight") {
-                        ds[group_index]
-                    } else if let Some(Attribute::Float(d)) = ty.attributes.get("syn_weight") {
+
+                    let x = if let Some(ds) = edge_group.x.as_ref() {
+                        ds[group_index as usize]
+                    } else if let Some(Attribute::Float(d)) =
+                        ty.attributes.get("afferent_section_xcoords")
+                    {
                         *d
+                    } else {
+                        bail!(
+                            "Edge {type_id} in population {} has no x",
+                            edge_population.name
+                        )
+                    };
+
+                    let y = if let Some(ds) = edge_group.y.as_ref() {
+                        ds[group_index as usize]
+                    } else if let Some(Attribute::Float(d)) =
+                        ty.attributes.get("afferent_section_ycoords")
+                    {
+                        *d
+                    } else {
+                        bail!(
+                            "Edge {type_id} in population {} has no y",
+                            edge_population.name
+                        )
+                    };
+
+                    let z = if let Some(ds) = edge_group.z.as_ref() {
+                        ds[group_index as usize]
+                    } else if let Some(Attribute::Float(d)) =
+                        ty.attributes.get("afferent_section_zcoords")
+                    {
+                        *d
+                    } else {
+                        bail!(
+                            "Edge {type_id} in population {} has no z",
+                            edge_population.name
+                        )
+                    };
+
+                    let weight = if let Some(ds) = edge_group.weight.as_ref() {
+                        ds[group_index as usize]
+                    } else if let Some(Attribute::Float(d)) = ty.attributes.get("syn_weight") {
+                        *d as f32
                     } else {
                         bail!(
                             "Edge {type_id} in population {} has no weight",
@@ -1067,115 +1149,21 @@ impl Simulation {
                         None
                     };
 
-                    let tgt_pos_x = if let Some(ds) =
-                        edge_group.custom.get("afferent_section_xcoords")
-                    {
-                        ds[group_index]
-                    } else if let Some(s) = ty.attributes.get("afferent_section_xcoords") {
-                        if let Attribute::Float(s) = s {
-                            *s
-                        } else {
-                            bail!(
-                                "Edge type {type_id} in population {} has non-numeric segment position",
-                                edge_population.name
-                            );
-                        }
-                    } else {
-                        bail!(
-                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `x` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                            edge_population.name
-                        );
-                    };
-
-                    let tgt_pos_y = if let Some(ds) =
-                        edge_group.custom.get("afferent_section_ycoords")
-                    {
-                        ds[group_index]
-                    } else if let Some(s) = ty.attributes.get("afferent_section_ycoords") {
-                        if let Attribute::Float(s) = s {
-                            *s
-                        } else {
-                            bail!(
-                                "Edge type {type_id} in population {} has non-numeric segment position",
-                                edge_population.name
-                            );
-                        }
-                    } else {
-                        bail!(
-                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `y` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                            edge_population.name
-                        );
-                    };
-
-                    let tgt_pos_z = if let Some(ds) =
-                        edge_group.custom.get("afferent_section_zcoords")
-                    {
-                        ds[group_index]
-                    } else if let Some(s) = ty.attributes.get("afferent_section_zcoords") {
-                        if let Attribute::Float(s) = s {
-                            *s
-                        } else {
-                            bail!(
-                                "Edge type {type_id} in population {} has non-numeric segment position",
-                                edge_population.name
-                            );
-                        }
-                    } else {
-                        bail!(
-                            "[UNSUPPORTED] Edge type {type_id} in population {} is missing the `z` coordinates for the target segments. (x,y,z) coordinates of traget segmemnts are required for synapse placement.",
-                            edge_population.name
-                        );
-                    };
-
-                    let src_pos = if let Some(ds) = edge_group.custom.get("efferent_swc_pos") {
-                        ds[group_index]
-                    } else if let Some(s) = ty.attributes.get("efferent_swc_pos") {
-                        if let Attribute::Float(s) = s {
-                            *s
-                        } else {
-                            bail!(
-                                "Edge type {type_id} in population {} has non-numeric segment position",
-                                edge_population.name
-                            );
-                        }
-                    } else {
-                        0.5 // default to centering
-                    };
-
-                    let src_id = if let Some(id) = edge_group.custom.get("efferent_swc_id") {
-                        bail!(
-                            "[UNSUPPORTED] Edge type {type_id} in population {} has efferent id {id:?}",
-                            edge_population.name
-                        );
-                        // ds[group_index]
-                    } else if let Some(id) = ty.attributes.get("efferent_swc_id") {
-                        bail!(
-                            "[UNSUPPORTED] Edge type {type_id} in population {} has efferent SWC id {id:?}",
-                            edge_population.name
-                        );
-                        // if let Attribute::Float(s) = s {
-                        // *s
-                        // } else {
-                        // bail!(
-                        // "Edge type {type_id} in population {} has non-numeric segment position",
-                        // edge_population.name
-                        // );
-                        // }
-                    } else {
-                        0.0 // default to first (=soma?)
-                    } as u64;
+                    // NOTE: These are fixed for now
+                    let src_pos = 0.5;
+                    let src_id = 0u32;
 
                     // Construct dynamics parameters by merging the type level defaults with the group level overrides.
                     let mut dynamics = ty.dynamics.clone();
                     for (k, vs) in &edge_group.dynamics {
-                        let v = vs[group_index];
+                        let v = vs[group_index as usize];
                         dynamics.insert(k.clone(), v);
                     }
 
                     incoming_edges.push(Edge {
                         src_gid,
                         source: (src_id, src_pos),
-                        target: (tgt_pos_x, tgt_pos_y, tgt_pos_z),
+                        target: (x, y, z),
                         mech,
                         delay,
                         weight,
@@ -1242,7 +1230,7 @@ impl Simulation {
 
         let mut dynamics: Map<Box<str>, _> = node_type.dynamics.clone();
         for (k, vs) in &group.dynamics {
-            dynamics.insert(k.clone(), vs[group_index]);
+            dynamics.insert(k.clone(), vs[group_index as usize]);
         }
 
         let mut custom: Map<Box<str>, _> = Map::new();
@@ -1252,13 +1240,13 @@ impl Simulation {
             }
         }
         for (k, vs) in group.custom.iter() {
-            custom.insert(k.clone(), vs[group_index]);
+            custom.insert(k.clone(), vs[group_index as usize]);
         }
 
         // Extract position coordinates (x, y, z)
         let get_cell_attributes = |c: &str| -> f64 {
             if let Some(cs) = group.custom.get(c) {
-                cs[group_index]
+                cs[group_index as usize]
             } else if let Some(Attribute::Float(val)) = node_type.attributes().get(c) {
                 *val
             } else {
@@ -1278,7 +1266,7 @@ impl Simulation {
             gid,
             pop: node_population.name.clone(),
             group_id: node_group_id,
-            node_id: node_index as u64,
+            node_id: node_index as u32,
             group_index,
             node_type_id,
             node_type,

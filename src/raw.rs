@@ -68,7 +68,7 @@ pub enum TimeBlock {
     #[default]
     None,
     #[serde(rename = "nsteps_block")]
-    Steps(u64),
+    Steps(u32),
     #[serde(rename = "tsteps_block")]
     Time(f64),
 }
@@ -96,7 +96,7 @@ pub struct Run {
     #[serde(default)]
     pub block: TimeBlock,
     /// Seed for PRNG
-    pub random_seed: Option<u64>,
+    pub random_seed: Option<u32>,
     // NOTE There's some ignored fields here:
     // * block_run
     // * block_size
@@ -188,7 +188,7 @@ pub enum NodeSet {
         #[serde(flatten)]
         rules: Map<String, Value>,
     },
-    Ids(Vec<u64>),
+    Ids(Vec<u32>),
     Compound(Vec<NodeSet>),
 }
 
@@ -236,7 +236,7 @@ pub enum Input {
         module: String,
         node_set: NodeSet,
         file: String,
-        sweep_id: u64,
+        sweep_id: u32,
         downsample: f64,
     },
     #[serde(rename = "syn_activity")]
@@ -437,7 +437,10 @@ impl Simulation {
         let base_dir = path
             .parent()
             .ok_or_else(|| anyhow!("Couldn't find parent of {path:?}."))?;
-        let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(&path).with_context(|| format!("Opening {path:?}"))?);
+        let rd = std::io::BufReader::with_capacity(
+            1 * 1024 * 1024,
+            File::open(&path).with_context(|| format!("Opening {path:?}"))?,
+        );
 
         // Read JSON
         let mut raw: SimulationRaw = serde_json::de::from_reader(rd)
@@ -462,7 +465,10 @@ impl Simulation {
             NetworkOrFile::File(file) => {
                 let mut path: String = base_dir.join(file).to_str().unwrap().into();
                 resolve_manifest(&mut path, &raw.manifest, base_dir)?;
-                let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(&path).with_context(|| format!("Opening {path:?}"))?);
+                let rd = std::io::BufReader::with_capacity(
+                    1 * 1024 * 1024,
+                    File::open(&path).with_context(|| format!("Opening {path:?}"))?,
+                );
                 let mut net: NetworkFile = serde_json::de::from_reader(rd)
                     .with_context(|| format!("Parsing network {path:?}"))?;
                 net.manifest.insert(
@@ -488,7 +494,10 @@ impl Simulation {
             if let Some(file) = raw.node_sets_file {
                 let mut path: String = base_dir.join(file).to_str().unwrap().into();
                 resolve_manifest(&mut path, &raw.manifest, base_dir)?;
-                let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(&path).with_context(|| format!("Opening {path:?}"))?);
+                let rd = std::io::BufReader::with_capacity(
+                    1 * 1024 * 1024,
+                    File::open(&path).with_context(|| format!("Opening {path:?}"))?,
+                );
                 let nds: Map<String, NodeSet> = serde_json::de::from_reader(rd)
                     .with_context(|| format!("Parsing nodesets {path:?}"))?;
                 raw.node_sets.extend(nds);

@@ -1,13 +1,15 @@
 use cantata::{
     err::{Context, Result},
     fit::Fit,
-    r#gen::Bundle,
+    r#gen::{Bundle, SimChunk},
     nml, raw,
     sim::Simulation,
     sup::find_component,
 };
 use clap::{self, Parser, Subcommand};
+use rayon::prelude::*;
 use std::str::FromStr;
+use tracing::{event, info_span, span, Level};
 
 #[derive(Parser)]
 #[clap(name = "sonata")]
@@ -30,11 +32,11 @@ enum Cmd {
     },
 }
 
-fn build(from: &str, to: &str) -> Result<()> {
+fn build(from: &str, to: &str, chunk_size: usize) -> Result<()> {
+    span!(Level::INFO, "Building {from} -> {to}");
     let raw =
         raw::Simulation::from_file(from).with_context(|| format!("Parsing simulation {from}"))?;
     let sim = Simulation::new(&raw).with_context(|| format!("Extracting simulation {from}"))?;
-    let mut out = Bundle::new(&sim).with_context(|| "Generating Python code")?;
 
     // Create all required directories
     let mut to = std::path::PathBuf::from_str(to)
@@ -42,64 +44,87 @@ fn build(from: &str, to: &str) -> Result<()> {
         .with_context(|| format!("Resolving output dir {to}"))?;
     std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
-    to.push("mrf");
-    std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-
-    for mrf in &out.morphology {
-        let src = find_component(mrf, &raw.components)
-            .with_context(|| format!("Searching morphology {mrf:?}"))?;
-        to.push(mrf);
-        std::fs::copy(&src, &to).with_context(|| format!("Copying {src:?} to {to:?}"))?;
-        to.pop();
-    }
-    to.pop();
-
-    to.push("acc");
-    std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-
-    for fit in out.decoration.iter_mut() {
-        to.push(fit as &str);
-        to.set_extension("acc");
-        let src = find_component(fit, &raw.components)
-            .with_context(|| format!("Searching raw fit {fit:?}"))?;
-        match src.extension().and_then(|s| s.to_str()) {
-            Some("json") => {
-                let inp = Fit::from_file(&src)
-                    .with_context(|| format!("Extracting fit {src:?}"))?
-                    .decor()
-                    .with_context(|| format!("Building decor for fit {src:?}"))?
-                    .to_acc()
-                    .with_context(|| format!("Converting fit {src:?} to acc"))?;
-                std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
-            }
-            Some("nml") => {
-                let data = find_component(fit, &sim.components)
-                    .with_context(|| format!("Searching raw fit {fit:?}"))?;
-                std::fs::write(&to, nml::mk_acc(&data)?)
-                    .with_context(|| format!("Writing {to:?}"))?;
-            }
-            Some(e) => anyhow::bail!("Unknown fit type {e}"),
-            None => anyhow::bail!("Unspecified fit type."),
-        }
-        to.pop();
-        *fit = format!("{}.acc", fit.rsplit_once('.').expect(".json?").0);
-    }
-    to.pop();
-
     to.push("dat");
     {
+        let out = Bundle::new(&sim, chunk_size).with_context(|| "Generating Header data")?;
         std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-        to.push("sim.cbor");
-        let writer = std::io::BufWriter::with_capacity(1*1024*1024, std::fs::File::create(&to)?);
+        to.push(&format!("sim.cbor"));
+        let writer =
+            std::io::BufWriter::with_capacity(1 * 1024 * 1024, std::fs::File::create(&to)?);
         ciborium::into_writer(&out, writer)?;
         to.pop();
     }
     to.pop();
+    
+    let chunks = info_span!("Creating chunks");
+    (0..(sim.size + chunk_size - 1)/chunk_size).into_par_iter().map(|idx| {
+        let _guard = chunks.enter();
+        event!(name: "Chunk", Level::INFO, "chunk={idx:6}");
+        let mut to = to.clone();
+        let lo = idx*chunk_size;
 
-    to.push("out");
-    std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
-    to.pop();
+        let mut out = SimChunk::new(&sim, lo, chunk_size).with_context(|| "Generating Python code")?;
+        
+        to.push("mrf");
+        std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
 
+        for mrf in &out.morphology {
+            let src = find_component(mrf, &raw.components)
+                .with_context(|| format!("Searching morphology {mrf:?}"))?;
+            to.push(mrf);
+            std::fs::copy(&src, &to).with_context(|| format!("Copying {src:?} to {to:?}"))?;
+            to.pop();
+        }
+        to.pop();
+
+        to.push("acc");
+        std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+
+        for fit in out.decoration.iter_mut() {
+            to.push(fit as &str);
+            to.set_extension("acc");
+            let src = find_component(fit, &raw.components)
+                .with_context(|| format!("Searching raw fit {fit:?}"))?;
+            match src.extension().and_then(|s| s.to_str()) {
+                Some("json") => {
+                    let inp = Fit::from_file(&src)
+                        .with_context(|| format!("Extracting fit {src:?}"))?
+                        .decor()
+                        .with_context(|| format!("Building decor for fit {src:?}"))?
+                        .to_acc()
+                        .with_context(|| format!("Converting fit {src:?} to acc"))?;
+                    std::fs::write(&to, inp).with_context(|| format!("Writing {to:?}"))?;
+                }
+                Some("nml") => {
+                    let data = find_component(fit, &sim.components)
+                        .with_context(|| format!("Searching raw fit {fit:?}"))?;
+                    std::fs::write(&to, nml::mk_acc(&data)?)
+                        .with_context(|| format!("Writing {to:?}"))?;
+                }
+                Some(e) => anyhow::bail!("Unknown fit type {e}"),
+                None => anyhow::bail!("Unspecified fit type."),
+            }
+            to.pop();
+            *fit = format!("{}.acc", fit.rsplit_once('.').expect(".json?").0);
+        }
+        to.pop();
+
+        to.push("dat");
+        {
+            std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+            to.push(&format!("chunk-{idx}.cbor"));
+            let writer =
+                std::io::BufWriter::with_capacity(1 * 1024 * 1024, std::fs::File::create(&to)?);
+            ciborium::into_writer(&out, writer)?;
+            to.pop();
+        }
+        to.pop();
+
+        to.push("out");
+        std::fs::create_dir_all(&to).with_context(|| format!("Creating output dir {to:?}"))?;
+        to.pop();
+        Ok(())
+    }).collect::<Result<Vec<_>>>()?;
     to.push("main.py");
     std::fs::write(&to, include_str!("../data/main.py"))
         .with_context(|| format!("Copying simulation file {to:?}"))?;
@@ -108,10 +133,17 @@ fn build(from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+const CHUNK_SIZE: usize = 100;
+
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .pretty()
+        .with_thread_names(true)
+        .with_max_level(tracing::Level::TRACE)
+        .init();    
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { from, to } => build(&from, &to),
+        Cmd::Build { from, to } => build(&from, &to, CHUNK_SIZE),
         Cmd::Run { from, to } => {
             let to = if let Some(to) = to {
                 to.to_string()
@@ -120,7 +152,7 @@ fn main() -> Result<()> {
                 to.set_extension("sim");
                 to.file_name().and_then(|s| s.to_str()).unwrap().to_string()
             };
-            build(&from, &to)?;
+            build(&from, &to, CHUNK_SIZE)?;
             let _ = std::process::Command::new("python3")
                 .current_dir(to)
                 .arg("main.py")

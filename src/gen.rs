@@ -10,13 +10,13 @@ use serde::Serialize;
 // Resources to store in the output.
 
 /// (src_gid, src_tag, tgt_tag, weight, delay)
-type ConnectionData = (usize, usize, usize, f64, f64);
+type ConnectionData = (u32, u32, u32, f32, f32);
 /// (location, variable, tag)
 type ProbeData = (Option<String>, String, usize);
 /// (x, y, z, mech, params, tag)
-type SynapseData = (f64, f64, f64, String, Map<Box<str>, f64>, usize);
+type SynapseData = (f64, f64, f64, String, Map<Box<str>, f64>, u32);
 /// (location, delay, duration, current, tag)
-type IClampData = (String, f64, f64, f64, usize);
+type IClampData = (String, f64, f64, f64, u32);
 
 /// Metadata about cell,
 /// mostly info discarded during generation
@@ -27,7 +27,7 @@ pub struct CellMetaData {
     /// population name
     pub population: String,
     /// cell type label
-    pub type_id: u64,
+    pub type_id: u32,
     /// cell position coordinates
     pub position: (f64, f64, f64),
     /// cell rotation angles
@@ -60,49 +60,85 @@ pub struct CableGlobalProperties {
 
 #[derive(Debug, Serialize)]
 pub struct Bundle {
+    /// end of simulation
     pub time: f64,
+    /// time step
     pub time_step: f64,
+    /// global number of cells
     pub size: usize,
+    /// number of cells per chunk
+    pub chunk_size: usize,
+    /// if given, split CVs into segment of at most [um]
     pub max_cv_length: Option<f64>,
+    /// spiking threshold
+    pub spike_threshold: f64,
+    /// cable cell global settings
+    pub cable_cell_globals: Option<CableGlobalProperties>, 
+}
+
+impl Bundle {
+    pub fn new(sim: &Simulation, chunk_size: usize) -> Result<Self> {
+        let max_cv_length = match &sim.cv_policy {
+            CVPolicy::Default => None,
+            CVPolicy::MaxExtent(l) => Some(*l),
+        };
+
+        let cable_cell_globals =
+            if let Some(GlobalProperties { celsius, v_init }) = sim.global_properties {
+                Some(CableGlobalProperties { celsius, v_init })
+            } else {
+                None
+            };
+        
+        Ok(Self {
+            time: sim.tfinal,
+            time_step: sim.dt,
+            max_cv_length,
+            size: sim.size,
+            chunk_size,
+            cable_cell_globals,
+            spike_threshold: sim.spike_threshold,
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SimChunk {
     /// gid to morphology and acc ids
     /// this works as an index into the next two fields.
-    pub cell_bio_ids: Map<usize, (usize, usize)>,
+    pub cell_bio_ids: Map<u32, (u32, u32)>,
     /// acc index to name
     pub morphology: Vec<String>,
     /// morphology index to name
     pub decoration: Vec<String>,
     /// cell kinds, 0 = cable, 1 = lif, 2 = spike source, ...
-    pub cell_kind: Vec<u64>,
+    pub cell_kind: Vec<u32>,
     /// synapse data, cross-linked with incoming connections.
     /// Location, Synapse, Parameters, Tag
     /// May only be set iff kind==cable
-    pub synapses: Map<usize, Vec<SynapseData>>,
+    pub synapses: Map<u32, Vec<SynapseData>>,
     /// stimuli; May only be set iff kind==cable
     /// location, delay, duration, amplitude, tag
-    pub current_clamps: Map<usize, Vec<IClampData>>,
+    pub current_clamps: Map<u32, Vec<IClampData>>,
     /// List of data exporters
-    /// location, variable, tag. NOTE _could_ make variable an u64?!
-    pub probes: Map<usize, Vec<ProbeData>>,
+    /// location, variable, tag. NOTE _could_ make variable an u32?!
+    pub probes: Map<u32, Vec<ProbeData>>,
     /// Incoming connections as (src_gid, src_tag, tgt_tag, weight, delay)
-    pub incoming_connections: Map<usize, Vec<ConnectionData>>,
-    /// Spiking threshold
-    pub spike_threshold: f64,
+    pub incoming_connections: Map<u32, Vec<ConnectionData>>,
     /// sparse map of gids to LIF cell descrption. Valid iff kind(gid) == LIF
-    pub gid_to_lif: Map<usize, Map<String, f64>>,
+    pub gid_to_lif: Map<u32, Map<String, f64>>,
     /// sparse map of gids to virtual cell spike trains. Valid iff kind(gid) == Virtual
     /// Will generate SpikeSource cells in Arbor
-    pub gid_to_vrt: Map<usize, Vec<f64>>,
+    pub gid_to_vrt: Map<u32, Vec<f64>>,
     /// dense map of gids to metadata
     pub metadata: Vec<CellMetaData>,
-    /// cable cell global settings
-    pub cable_cell_globals: Option<CableGlobalProperties>,
     /// cell counts by kind
-    pub count_by_kind: [usize; 3],
+    pub count_by_kind: [u32; 3],
 }
 
-const KIND_CABLE: u64 = 0;
-const KIND_LIF: u64 = 1;
-const KIND_SOURCE: u64 = 2;
+const KIND_CABLE: u32 = 0;
+const KIND_LIF: u32 = 1;
+const KIND_SOURCE: u32 = 2;
 
 const SYNAPSES: &[(&str, &str)] = &[("exp2syn", "Exp2Syn")];
 
@@ -115,8 +151,8 @@ fn fudge_synapse_dynamics(old: &str) -> String {
     .to_string()
 }
 
-impl Bundle {
-    pub fn new(sim: &Simulation) -> Result<Self> {
+impl SimChunk {
+    pub fn new(sim: &Simulation, start: usize, chunk_size: usize) -> Result<Self> {
         // Reverse lookup tables, used internally for uniqueness and index generation.
         let mut acc_to_cid = Map::new();
         let mut mrf_to_mid = Map::new();
@@ -134,7 +170,8 @@ impl Bundle {
         let mut gid_to_lif = Map::new();
         let mut gid_to_vrt = Map::new();
         let mut count_by_kind = [0; 3];
-        for gid in 0..sim.size {
+        
+        for gid in start..std::cmp::min(start + chunk_size, sim.size) {
             let node = sim.reify_node(gid)?;
             let incoming_edges = sim.reify_edges(gid)?;
             gid_to_meta.push(CellMetaData::from(&node));
@@ -144,9 +181,9 @@ impl Bundle {
                     let mut syn = Vec::new();
                     for (ix, edge) in incoming_edges.iter().enumerate() {
                         inc.push((
-                            edge.src_gid as usize,
+                            edge.src_gid,
                             0, // in our SONATA model, there is _one_ source on each cell.
-                            ix,
+                            ix as u32,
                             edge.weight,
                             edge.delay,
                         ));
@@ -158,17 +195,17 @@ impl Bundle {
                             edge.target.2,
                             mech,
                             edge.dynamics.clone(),
-                            ix,
+                            ix as u32,
                         ));
                     }
-                    incoming_connections.insert(gid, inc);
-                    synapses.insert(gid, syn);
+                    incoming_connections.insert(gid as u32, inc);
+                    synapses.insert(gid as u32, syn);
                 } else {
                     let inc = incoming_edges
                         .iter()
                         .map(|e| {
                             (
-                                e.src_gid as usize,
+                                e.src_gid as u32,
                                 0, // in our SONATA model, there is _one_ source on each cell.
                                 0,
                                 e.weight,
@@ -176,7 +213,7 @@ impl Bundle {
                             )
                         })
                         .collect::<Vec<_>>();
-                    incoming_connections.insert(gid, inc);
+                    incoming_connections.insert(gid as u32, inc);
                 };
             }
             match &node.node_type.model_type {
@@ -215,7 +252,7 @@ impl Bundle {
                                     "GID {gid} is a biophysical cell, but has no dynamics_params."
                                 );
                             };
-                            cell_bio_ids.insert(gid, (mid, cid));
+                            cell_bio_ids.insert(gid as u32, (mid as u32, cid as u32));
                         }
                         acc if acc.starts_with("nml:") => {
                             let mid = if let Some(Attribute::String(mrf)) =
@@ -238,14 +275,14 @@ impl Bundle {
                                 acc_to_cid.insert(acc.to_string(), cid);
                             };
                             let cid = acc_to_cid[acc];
-                            cell_bio_ids.insert(gid, (mid, cid));
+                            cell_bio_ids.insert(gid as u32, (mid as u32, cid as u32));
                         }
                         t => bail!("Unknown model template <{t}> for gid {gid}"),
                     }
                 }
                 ModelType::Virtual { .. } => {
                     // The fields are largely irrelevant here
-                    let data: &mut Vec<f64> = gid_to_vrt.entry(gid).or_default();
+                    let data: &mut Vec<f64> = gid_to_vrt.entry(gid as u32).or_default();
                     if let Some(group) = sim.virtual_spikes.get(node.pop.as_ref()) {
                         if let Some(ts) = group.get(&node.node_id) {
                             data.append(&mut ts.clone());
@@ -278,7 +315,7 @@ impl Bundle {
                                     ),
                                 };
                             }
-                            gid_to_lif.insert(gid, params);
+                            gid_to_lif.insert(gid as u32, params);
                         }
                         t => bail!("Unknown model template <{t}> for gid {gid}"),
                     }
@@ -302,10 +339,10 @@ impl Bundle {
                     *delay_ms,
                     *duration_ms,
                     *amplitude_nA,
-                    *tag,
+                    *tag as u32,
                 ));
             }
-            current_clamps.insert(*gid as usize, stim);
+            current_clamps.insert(*gid as u32, stim);
         }
 
         for (gid, sim_probes) in &sim.reports {
@@ -337,42 +374,24 @@ impl Bundle {
                     }
                 }
             }
-            probes.insert(*gid as usize, prbs);
+            probes.insert(*gid as u32, prbs);
         }
-
-        let max_cv_length = match &sim.cv_policy {
-            CVPolicy::Default => None,
-            CVPolicy::MaxExtent(l) => Some(*l),
-        };
-
-        let cable_cell_globals =
-            if let Some(GlobalProperties { celsius, v_init }) = sim.global_properties {
-                Some(CableGlobalProperties { celsius, v_init })
-            } else {
-                None
-            };
 
         // Sort all spike sources. Just to be sure...
         gid_to_vrt.values_mut().for_each(|ts| {
             ts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         });
 
-        Ok(Bundle {
-            time: sim.tfinal,
-            time_step: sim.dt,
-            max_cv_length,
-            size: sim.size,
+        Ok(SimChunk {
             cell_bio_ids,
             morphology,
             decoration,
             synapses,
-            cable_cell_globals,
             probes,
             incoming_connections,
             cell_kind,
             count_by_kind,
             current_clamps,
-            spike_threshold: sim.spike_threshold,
             gid_to_lif,
             gid_to_vrt,
             metadata: gid_to_meta,

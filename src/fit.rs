@@ -224,7 +224,10 @@ impl Decor {
 
 impl Fit {
     pub fn from_file(path: &PathBuf) -> Result<Self> {
-        let rd = std::io::BufReader::with_capacity(1*1024*1024, File::open(path).with_context(|| format!("Opening {path:?}"))?);
+        let rd = std::io::BufReader::with_capacity(
+            1 * 1024 * 1024,
+            File::open(path).with_context(|| format!("Opening {path:?}"))?,
+        );
         let fit =
             serde_json::de::from_reader(rd).with_context(|| format!("Parsing fit {path:?}"))?;
         Ok(fit)
