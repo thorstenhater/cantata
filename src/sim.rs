@@ -8,8 +8,8 @@ use crate::{
 use anyhow::{anyhow, bail};
 use hdf5_metno as hdf5;
 use serde::{Deserialize, Serialize};
-use tracing::{event, span, Level};
 use std::{fs::File, str::FromStr};
+use tracing::{Level, event, span};
 
 /// Model types currently known to SONATA
 ///
@@ -304,9 +304,9 @@ impl EdgeType {
 struct EdgeGroup {
     pub id: u32,
     // afferent position in 3d
-    pub x: Option<Vec<f64>>,
-    pub y: Option<Vec<f64>>,
-    pub z: Option<Vec<f64>>,
+    pub x: Option<Vec<f32>>,
+    pub y: Option<Vec<f32>>,
+    pub z: Option<Vec<f32>>,
     // synaptic weight
     pub weight: Option<Vec<f32>>,
     pub delay: Option<Vec<f32>>,
@@ -354,14 +354,14 @@ struct EdgeGroup {
 ///   under the population
 #[derive(Debug)]
 struct EdgePopulation {
-    name: String,
     size: usize,
+    name: String,
+    source_pop: String,
+    target_pop: String,
     type_ids: Vec<u32>,
     group_ids: Vec<u32>,
     source_ids: Vec<u32>,
-    source_pop: String,
     target_ids: Vec<u32>,
-    target_pop: String,
     group_indices: Vec<u32>,
     groups: Vec<EdgeGroup>,
 }
@@ -432,19 +432,19 @@ impl EdgePopulation {
                 }
             }
             let x = group.dataset("afferent_section_xcoords").ok().map(|ds| {
-                ds.read_1d::<f64>()
+                ds.read_1d::<f32>()
                     .expect(&format!("Extracting group position from id {group_id}"))
                     .to_vec()
             });
 
             let y = group.dataset("afferent_section_ycoords").ok().map(|ds| {
-                ds.read_1d::<f64>()
+                ds.read_1d::<f32>()
                     .expect(&format!("Extracting group position from id {group_id}"))
                     .to_vec()
             });
 
             let z = group.dataset("afferent_section_zcoords").ok().map(|ds| {
-                ds.read_1d::<f64>()
+                ds.read_1d::<f32>()
                     .expect(&format!("Extracting group position from id {group_id}"))
                     .to_vec()
             });
@@ -540,9 +540,9 @@ impl EdgeList {
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub src_gid: u32,
-    pub source: (u32, f64),
-    pub target: (f64, f64, f64),
-    pub mech: Option<String>,
+    pub source: (u32, f32),
+    pub target: (f32, f32, f32),
+    pub mech: Option<Box<str>>,
     pub delay: f32,
     pub weight: f32,
     pub dynamics: Map<Box<str>, f64>,
@@ -816,7 +816,7 @@ impl Simulation {
             };
 
         event!(name: "Raw2SimDone", Level::INFO, "Instantiated simulation with {start} nodes.");
-        
+
         let mut res = Self {
             tfinal: sim.run.tstop,
             dt: sim.run.dt,
@@ -832,7 +832,7 @@ impl Simulation {
             virtual_spikes,
             global_properties,
             components: sim.components.clone(),
-            size: std::cmp::min(start, 2000),
+            size: start,
             spike_threshold: sim.run.spike_threshold.expect("No spike threshold?"),
         };
 
@@ -1013,6 +1013,12 @@ impl Simulation {
                 .iter()
                 .filter(|p| p.target_pop.as_str() == target_population.as_ref())
             {
+                let src_pop = &edge_population.source_pop;
+                let src_idx = self
+                    .node_population_ids
+                    .get(src_pop.as_str())
+                    .ok_or_else(|| anyhow!("Unknown population <{src_pop}>"))?;
+
                 for (edge_index, _) in edge_population
                     .target_ids
                     .iter()
@@ -1036,11 +1042,6 @@ impl Simulation {
                         .source_ids
                         .get(edge_index)
                         .ok_or_else(edge_index_error)?;
-                    let src_pop = &edge_population.source_pop;
-                    let src_idx = self
-                        .node_population_ids
-                        .get(src_pop.as_str())
-                        .ok_or_else(|| anyhow!("Unknown population <{src_pop}>"))?;
                     let src_gid = *self
                         .node_population_to_gid
                         .get(&(*src_idx, *src_id))
@@ -1091,7 +1092,7 @@ impl Simulation {
                     } else if let Some(Attribute::Float(d)) =
                         ty.attributes.get("afferent_section_xcoords")
                     {
-                        *d
+                        *d as f32
                     } else {
                         bail!(
                             "Edge {type_id} in population {} has no x",
@@ -1104,7 +1105,7 @@ impl Simulation {
                     } else if let Some(Attribute::Float(d)) =
                         ty.attributes.get("afferent_section_ycoords")
                     {
-                        *d
+                        *d as f32
                     } else {
                         bail!(
                             "Edge {type_id} in population {} has no y",
@@ -1117,7 +1118,7 @@ impl Simulation {
                     } else if let Some(Attribute::Float(d)) =
                         ty.attributes.get("afferent_section_zcoords")
                     {
-                        *d
+                        *d as f32
                     } else {
                         bail!(
                             "Edge {type_id} in population {} has no z",
@@ -1138,7 +1139,7 @@ impl Simulation {
 
                     let mech = if let Some(s) = ty.attributes.get("model_template") {
                         if let Attribute::String(s) = s {
-                            Some(s.to_string())
+                            Some(s.clone().into_boxed_str())
                         } else {
                             bail!(
                                 "Edge type {type_id} in population {} has non-string model",

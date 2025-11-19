@@ -342,7 +342,7 @@ class recipe(A.recipe):
         swc_pos = A.isometry.translate(dp.x, dp.y, dp.z)
 
         # The position SONATA places the soma at
-        meta = chunk.gid_to_meta[gid]
+        meta = chunk.gid_to_meta[gid - chunk.start]
 
         x, y, z = meta["position"]
         son_ipos = A.isometry.translate(-x, -y, -z)
@@ -452,33 +452,29 @@ class recipe(A.recipe):
 
     def make_vrt_cell(self, gid):
         data = self._get_chunk(gid).gid_to_vrt[gid]
-        print("virt spikes", gid, len(data))
         return A.spike_source_cell(
             "src-0", A.explicit_schedule([t * U.ms for t in data])
         )
 
     def load_cable_data(self, gid):
-        chunk = self._get_chunk(gid)
-        mid, cid = chunk.gid_to_bio[gid]
-        if mid not in self.mrfs:
+        mid, cid = self.gid_to_bio[gid]
+        if gid not in self.cable_data:
             timing.tic("build/simulation/io")
-            self.mrfs[mid] = load_morphology(here / "mrf" / chunk.mid_to_mrf[mid])
-        if cid not in self.accs:
-            self.accs[cid] = A.load_component(here / "acc" / chunk.cid_to_acc[cid]).component
+            mrf = load_morphology(here / "mrf" / self.mid_to_mrf[mid])
+            dec = A.load_component(here / "acc" / self.cid_to_acc[cid]).component
+            self.cable_data[gid] = (mrf, dec)
             timing.toc("build/simulation/io")
-        return self.mrfs[mid], A.decor(self.accs[cid])  # NOTE copy that decor!!
+        mrf, dec = self.cable_data[gid]
+        return mrf, A.decor(dec)  # NOTE copy that decor!!
 
     def cell_description(self, gid):
         chunk = self._get_chunk(gid)
         kid = chunk.gid_to_kid[gid - chunk.start]
         if kid == 0:
-            print(gid, 'CABLE')
             return self.make_cable_cell(gid)
         elif kid == 1:
-            print(gid, 'LIF')
             return self.make_lif_cell(gid)
         elif kid == 2:
-            print(gid, 'SOURCE')
             return self.make_vrt_cell(gid)
         else:
             raise RuntimeError(f"Unknown kind for gid={gid}")

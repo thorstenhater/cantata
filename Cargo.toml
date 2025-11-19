@@ -28,3 +28,9 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "std", "ans
 [[bin]]
 name = "cantata"
 path = "src/main.rs"
+
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[profile.release]
+codegen-units = 1

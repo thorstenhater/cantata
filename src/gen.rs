@@ -73,7 +73,7 @@ pub struct Bundle {
     /// spiking threshold
     pub spike_threshold: f64,
     /// cable cell global settings
-    pub cable_cell_globals: Option<CableGlobalProperties>, 
+    pub cable_cell_globals: Option<CableGlobalProperties>,
 }
 
 impl Bundle {
@@ -89,7 +89,7 @@ impl Bundle {
             } else {
                 None
             };
-        
+
         Ok(Self {
             time: sim.tfinal,
             time_step: sim.dt,
@@ -170,7 +170,7 @@ impl SimChunk {
         let mut gid_to_lif = Map::new();
         let mut gid_to_vrt = Map::new();
         let mut count_by_kind = [0; 3];
-        
+
         for gid in start..std::cmp::min(start + chunk_size, sim.size) {
             let node = sim.reify_node(gid)?;
             let incoming_edges = sim.reify_edges(gid)?;
@@ -325,6 +325,9 @@ impl SimChunk {
         }
 
         for (gid, ics) in &sim.iclamps {
+            if ((*gid as usize) < start) || ((*gid as usize) >= start + chunk_size) {
+                continue;
+            }
             let mut stim = Vec::new();
             for IClamp {
                 amplitude_nA,
@@ -346,6 +349,9 @@ impl SimChunk {
         }
 
         for (gid, sim_probes) in &sim.reports {
+            if ((*gid as usize) < start) || ((*gid as usize) >= start + chunk_size) {
+                continue;
+            }
             let mut prbs = Vec::new();
             for (ix, probe) in sim_probes.iter().enumerate() {
                 match probe {
